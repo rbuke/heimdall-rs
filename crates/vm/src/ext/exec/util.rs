@@ -23,6 +23,30 @@ pub(super) fn stack_diff(a: &Stack, b: &Stack) -> Vec<StackFrame> {
     diff
 }
 
+/// Like [`stack_diff`], but keeps only the slots of A whose expression grew out of the slot at the
+/// same position in B (B's expression is a strict sub-expression of A's, e.g. `i` -> `i + 1`), plus
+/// slots B does not have. A slot that was merely replaced by an unrelated value is left out.
+pub(super) fn grown_stack_diff(a: &Stack, b: &Stack) -> Vec<StackFrame> {
+    let mut diff = Vec::new();
+
+    for (i, frame) in a.stack.iter().enumerate() {
+        if b.stack.len() <= i {
+            diff.push(frame.clone());
+            continue;
+        }
+        if frame == &b.stack[i] {
+            continue;
+        }
+        let new = frame.operation.solidify();
+        let old = b.stack[i].operation.solidify();
+        if new.len() > old.len() && new.contains(&old) {
+            diff.push(frame.clone());
+        }
+    }
+
+    diff
+}
+
 /// Check if the given stack contains too many items to feasibly
 /// reach the bottom of the stack without being a loop.
 pub(super) fn stack_contains_too_many_items(stack: &Stack) -> bool {
@@ -318,4 +342,48 @@ fn is_consistently_alternating(values: &[U256]) -> bool {
 
     // Require at least 60% of triples to alternate
     alternating_triples as f64 / total_triples as f64 >= 0.6
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use alloy::primitives::U256;
+
+    use super::{grown_stack_diff, jump_condition_appears_recursive};
+    use crate::core::{
+        opcodes::{WrappedInput, WrappedOpcode, ADD, CALLDATALOAD},
+        stack::Stack,
+    };
+
+    fn arg(offset: u64) -> WrappedOpcode {
+        WrappedOpcode::new(CALLDATALOAD, vec![WrappedInput::Raw(U256::from(offset))])
+    }
+
+    #[test]
+    fn test_grown_stack_diff_ignores_replaced_slot() {
+        // one shared validator called for arg0, then for arg1: the slot is replaced, not grown
+        let (mut first, mut second) = (Stack::new(), Stack::new());
+        first.push(U256::from(1), arg(4));
+        second.push(U256::from(2), arg(36));
+        let diff = grown_stack_diff(&second, &first);
+        assert!(diff.is_empty());
+        assert!(!jump_condition_appears_recursive(&diff, "arg1 == (address(arg1))"));
+    }
+
+    #[test]
+    fn test_grown_stack_diff_keeps_grown_slot() {
+        // a loop counter: `arg0` -> `arg0 + 0x01`
+        let (mut first, mut second) = (Stack::new(), Stack::new());
+        first.push(U256::from(1), arg(4));
+        second.push(
+            U256::from(2),
+            WrappedOpcode::new(
+                ADD,
+                vec![WrappedInput::Opcode(Arc::new(arg(4))), WrappedInput::Raw(U256::from(1))],
+            ),
+        );
+        let diff = grown_stack_diff(&second, &first);
+        assert_eq!(diff.len(), 1);
+    }
 }

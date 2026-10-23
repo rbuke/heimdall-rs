@@ -13,7 +13,7 @@ use crate::{
             jump_condition_contains_mutated_memory_access,
             jump_condition_contains_mutated_storage_access,
             jump_stack_depth_less_than_max_stack_depth, stack_contains_too_many_items,
-            stack_contains_too_many_of_the_same_item, stack_diff, stack_item_source_depth_too_deep,
+            grown_stack_diff, stack_contains_too_many_of_the_same_item, stack_diff, stack_item_source_depth_too_deep,
             stack_position_shows_pattern,
         },
     },
@@ -233,8 +233,14 @@ impl VM {
 
                                 trace!("stack diff: [{}]", stack_diff.iter().map(|frame| format!("{}", frame.value)).collect::<Vec<String>>().join(", "));
 
-                                // check if the jump condition appears to be recursive
-                                if jump_condition_appears_recursive(&stack_diff, jump_condition) {
+                                // check if the jump condition appears to be recursive. only slots whose
+                                // value grew out of the historical one (`i` -> `i + 1`) count: a slot
+                                // replaced by an unrelated value (`arg0` -> `arg1`, two calls of one shared
+                                // validator) is not a loop variable.
+                                if jump_condition_appears_recursive(
+                                    &grown_stack_diff(&vm.stack, hist_stack),
+                                    jump_condition,
+                                ) {
                                     return true
                                 }
 
