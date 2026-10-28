@@ -109,8 +109,7 @@ pub fn find_function_selectors(evm: &VM, assembly: &str) -> HashMap<String, u128
         handled_selectors.insert(function_selector.clone());
 
         // get the function's entry point
-        let function_entry_point = match resolve_entry_point(&mut evm.clone(), &function_selector)
-        {
+        let function_entry_point = match resolve_entry_point(&mut evm.clone(), &function_selector) {
             0 => continue,
             x => x,
         };
@@ -248,12 +247,13 @@ fn selector_compare(condition: &WrappedOpcode, selector: U256) -> Option<bool> {
 fn push_value(input: &WrappedInput) -> Option<U256> {
     match input {
         WrappedInput::Raw(value) => Some(*value),
-        WrappedInput::Opcode(op) if (PUSH0..=PUSH32).contains(&op.opcode) => match op.inputs.first()
-        {
-            Some(WrappedInput::Raw(value)) => Some(*value),
-            None => Some(U256::ZERO),
-            _ => None,
-        },
+        WrappedInput::Opcode(op) if (PUSH0..=PUSH32).contains(&op.opcode) => {
+            match op.inputs.first() {
+                Some(WrappedInput::Raw(value)) => Some(*value),
+                None => Some(U256::ZERO),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -321,8 +321,8 @@ mod tests {
 
     use super::{push_is_compared, selector_compare};
     use crate::core::opcodes::{
-        WrappedInput, WrappedOpcode, CALLDATALOAD, EQ, GT, ISZERO, MLOAD, PUSH0, PUSH1, PUSH4,
-        SHR, SLOAD, SUB, XOR,
+        WrappedInput, WrappedOpcode, CALLDATALOAD, EQ, GT, ISZERO, MLOAD, PUSH0, PUSH1, PUSH4, SHR,
+        SLOAD, SUB, XOR,
     };
 
     const SELECTOR: u64 = 0xf04f2707;
@@ -358,10 +358,8 @@ mod tests {
         // the last leaf of a solc table, vyper 0.3, vyper 0.2 (selector reloaded from memory)
         let sub = op(SUB, vec![push(PUSH4, SELECTOR), msg_sig()]);
         let xor = op(XOR, vec![push(PUSH4, SELECTOR), msg_sig()]);
-        let eq_iszero = op(
-            ISZERO,
-            vec![op(EQ, vec![push(PUSH4, SELECTOR), op(MLOAD, vec![push(PUSH1, 0)])])],
-        );
+        let eq_iszero =
+            op(ISZERO, vec![op(EQ, vec![push(PUSH4, SELECTOR), op(MLOAD, vec![push(PUSH1, 0)])])]);
         for condition in [sub, xor, eq_iszero] {
             assert_eq!(selector_compare(&condition, U256::from(SELECTOR)), Some(false));
         }

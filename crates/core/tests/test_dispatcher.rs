@@ -59,7 +59,8 @@ mod dispatcher_tests {
     fn test_dispatcher_solc_sub_last_leaf_and_fallthrough_body() {
         // solc 0.8 via-IR flash-loan executor (polygon 0xc2c6f4f7e1425be1dcb996175cf7852bf53c23e2
         // at block 95204744): seven EQ leaves, and the eighth selector compiled as the last leaf
-        // `PUSH4 f04f2707 SUB PUSH2 000f JUMPI` with the body falling through right after the JUMPI.
+        // `PUSH4 f04f2707 SUB PUSH2 000f JUMPI` with the body falling through right after the
+        // JUMPI.
         let source = decompile_fixture("flash-loan-executor-solc-0.8");
         let selectors = [
             "610c95d0", "6c0137c4", "91dd7346", "de463630", "e352d1b0", "e56e7158", "e9cbafb0",

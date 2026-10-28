@@ -194,8 +194,7 @@ pub(crate) fn argument_heuristic<'a>(
                 // check if this is a state getter: no arguments, and a plain storage read
                 // returned (a value computed from storage is not a getter's)
                 if function.arguments.is_empty() {
-                    if let Some(slot) = getter_storage_slot(&return_memory_operations_solidified)
-                    {
+                    if let Some(slot) = getter_storage_slot(&return_memory_operations_solidified) {
                         function.maybe_getter_for = Some(slot);
                     }
                 }

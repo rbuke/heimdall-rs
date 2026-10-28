@@ -52,7 +52,8 @@ pub(crate) fn getter_storage_slot(expr: &str) -> Option<String> {
     // what is left may only be `return`, casts, parentheses, masks, shifts, negations and
     // constants
     let plain_chars = rest.chars().all(|c| {
-        c.is_ascii_alphanumeric() || matches!(c, '_' | ' ' | '(' | ')' | '&' | '>' | '/' | '!' | ';')
+        c.is_ascii_alphanumeric() ||
+            matches!(c, '_' | ' ' | '(' | ')' | '&' | '>' | '/' | '!' | ';')
     });
     let plain_tokens = rest
         .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
@@ -96,8 +97,16 @@ mod tests {
             // a check on state is logic (a float computation written as overflow checks)
             vec!["require(0 - storage[0x0c], \"float128: overflow\");", "return storage[0x05];"],
             // a cached value on one path, a computed one on another
-            vec!["if (storage[0x05]) {", "return storage[0x05];", "}", "return storage[0x06] * 0x02;"],
-            vec!["(bool success, bytes memory ret0) = address(arg0).call(var_a);", "return storage[0x05];"],
+            vec![
+                "if (storage[0x05]) {",
+                "return storage[0x05];",
+                "}",
+                "return storage[0x06] * 0x02;",
+            ],
+            vec![
+                "(bool success, bytes memory ret0) = address(arg0).call(var_a);",
+                "return storage[0x05];",
+            ],
             vec!["storage[0x05] = 0x01;", "return storage[0x05];"],
             vec!["emit Event_abcdef01();", "return storage[0x05];"],
         ] {

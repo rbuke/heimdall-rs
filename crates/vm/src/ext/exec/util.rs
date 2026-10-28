@@ -405,8 +405,8 @@ mod tests {
     use hashbrown::HashMap;
 
     use super::{
-        call_context, grown_stack_diff, jump_condition_appears_recursive, jumpdest_table,
-        jump_stack_depth_less_than_max_stack_depth,
+        call_context, grown_stack_diff, jump_condition_appears_recursive,
+        jump_stack_depth_less_than_max_stack_depth, jumpdest_table,
     };
     use crate::{
         core::{

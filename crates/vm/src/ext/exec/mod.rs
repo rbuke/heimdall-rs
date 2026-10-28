@@ -380,12 +380,8 @@ impl VM {
                     let mut trace_vm = vm.clone();
                     trace_vm.instruction =
                         last_instruction.inputs[0].try_into().unwrap_or(u128::MAX) + 1;
-                    match trace_vm.recursive_map(
-                        branch_count,
-                        handled_jumps,
-                        timeout_at,
-                        jumpdests,
-                    ) {
+                    match trace_vm.recursive_map(branch_count, handled_jumps, timeout_at, jumpdests)
+                    {
                         Ok(Some(child_trace)) => vm_trace.children.push(child_trace),
                         Ok(None) => {}
                         Err(e) => {
@@ -408,12 +404,8 @@ impl VM {
                     // push a new vm trace to the children
                     let mut trace_vm = vm.clone();
                     trace_vm.instruction = last_instruction.instruction + 1;
-                    match trace_vm.recursive_map(
-                        branch_count,
-                        handled_jumps,
-                        timeout_at,
-                        jumpdests,
-                    ) {
+                    match trace_vm.recursive_map(branch_count, handled_jumps, timeout_at, jumpdests)
+                    {
                         Ok(Some(child_trace)) => vm_trace.children.push(child_trace),
                         Ok(None) => {}
                         Err(e) => {
