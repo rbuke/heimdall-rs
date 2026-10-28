@@ -309,23 +309,34 @@ fn get_storage_variables(
 ) -> Vec<String> {
     let mut output: Vec<String> = storage_variables
         .iter()
-        .map(|(name, typ)| {
-            if let Some(f) = functions.iter().find(|f| f.maybe_getter_for.as_ref() == Some(name)) {
-                let name = f
-                    .resolved_function
-                    .as_ref()
-                    .map(|x| x.name.clone())
-                    .unwrap_or_else(|| format!("unresolved_{}", f.selector));
+        .flat_map(|(name, typ)| {
+            // every getter of the variable gets a declaration: solc packs bools, small integers
+            // and addresses into one slot, so two getters can read the same word, and the
+            // second one was dropped from the output altogether
+            let getters = functions
+                .iter()
+                .filter(|f| f.maybe_getter_for.as_ref() == Some(name))
+                .map(|f| {
+                    let name = f
+                        .resolved_function
+                        .as_ref()
+                        .map(|x| x.name.clone())
+                        .unwrap_or_else(|| format!("unresolved_{}", f.selector));
 
-                // TODO: for public getters, we can use `eth_getStorageAt` to get the value
-                return format!(
-                    "{} public {};",
-                    f.returns.as_ref().unwrap_or(typ).replacen("memory", "", 1).trim(),
-                    name,
-                );
+                    // TODO: for public getters, we can use `eth_getStorageAt` to get the value
+                    format!(
+                        "{} public {};",
+                        f.returns.as_ref().unwrap_or(typ).replacen("memory", "", 1).trim(),
+                        name,
+                    )
+                })
+                .collect::<Vec<String>>();
+
+            if getters.is_empty() {
+                vec![format!("{typ} {name};")]
+            } else {
+                getters
             }
-
-            format!("{typ} {name};")
         })
         .collect();
     if !output.is_empty() {
