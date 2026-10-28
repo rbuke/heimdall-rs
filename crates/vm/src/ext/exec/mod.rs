@@ -9,12 +9,12 @@ use crate::{
     ext::exec::{
         jump_frame::JumpFrame,
         util::{
-            historical_diffs_approximately_equal, jump_condition_appears_recursive,
-            jump_condition_contains_mutated_memory_access,
+            call_context, grown_stack_diff, historical_diffs_approximately_equal,
+            jump_condition_appears_recursive, jump_condition_contains_mutated_memory_access,
             jump_condition_contains_mutated_storage_access,
-            jump_stack_depth_less_than_max_stack_depth, stack_contains_too_many_items,
-            grown_stack_diff, stack_contains_too_many_of_the_same_item, stack_diff, stack_item_source_depth_too_deep,
-            stack_position_shows_pattern,
+            jump_stack_depth_less_than_max_stack_depth, jumpdest_table,
+            stack_contains_too_many_items, stack_contains_too_many_of_the_same_item, stack_diff,
+            stack_item_source_depth_too_deep, stack_position_shows_pattern,
         },
     },
 };
@@ -53,8 +53,13 @@ impl VM {
     ) -> Result<(VMTrace, u32)> {
         self.calldata = decode_hex(selector)?;
 
-        // step through the bytecode until we reach the entry point
-        while self.bytecode.len() >= self.instruction as usize && (self.instruction <= entry_point)
+        // step through the dispatcher until the VM stands at the entry point. this stops at the
+        // entry point itself, not at the first instruction past it: a dispatcher may call a
+        // helper placed after the entry point (solc via-IR puts the selector shift behind the
+        // leaf stubs), and stopping there would trace the dispatcher, and every other function's
+        // body behind its leaves, as this function's own.
+        while self.bytecode.len() >= self.instruction as usize &&
+            self.instruction != entry_point + 1
         {
             match self.step() {
                 Ok(_) => {}
@@ -74,7 +79,13 @@ impl VM {
 
         // the VM is at the function entry point, begin tracing
         let mut branch_count = 0;
-        let trace = match self.recursive_map(&mut branch_count, &mut HashMap::new(), &timeout)? {
+        let jumpdests = jumpdest_table(&self.bytecode);
+        let trace = match self.recursive_map(
+            &mut branch_count,
+            &mut HashMap::new(),
+            &timeout,
+            &jumpdests,
+        )? {
             Some(trace) => trace,
             None => {
                 warn!("symbolic execution returned no valid traces for selector 0x{}", selector);
@@ -107,7 +118,13 @@ impl VM {
 
         // the VM is at the function entry point, begin tracing
         let mut branch_count = 0;
-        let trace = match self.recursive_map(&mut branch_count, &mut HashMap::new(), &timeout)? {
+        let jumpdests = jumpdest_table(&self.bytecode);
+        let trace = match self.recursive_map(
+            &mut branch_count,
+            &mut HashMap::new(),
+            &timeout,
+            &jumpdests,
+        )? {
             Some(trace) => trace,
             None => {
                 warn!("symbolic execution returned no valid traces");
@@ -127,6 +144,7 @@ impl VM {
         branch_count: &mut u32,
         handled_jumps: &mut HashMap<JumpFrame, Vec<Stack>>,
         timeout_at: &Instant,
+        jumpdests: &[bool],
     ) -> Result<Option<VMTrace>> {
         let vm = self;
 
@@ -182,6 +200,12 @@ impl VM {
                     jump_taken,
                 );
 
+                // the chain of internal calls this JUMPI was reached through. a shared helper
+                // (solc's memory allocator, an address validator) reached again from another
+                // call site is a new call, not a loop: the checks that compare the stack with
+                // the earlier calls' stacks only compare calls made from the same chain.
+                let context = call_context(&vm.stack, jumpdests);
+
                 // if the stack contains too many items, it's probably a loop
                 if stack_contains_too_many_items(&vm.stack) {
                     return Ok(None);
@@ -199,8 +223,13 @@ impl VM {
                 }
 
                 // if the jump stack depth is less than the max stack depth of all previous matching
-                // jumps, it's probably a loop
-                if jump_stack_depth_less_than_max_stack_depth(&jump_frame, handled_jumps) {
+                // jumps made from the same chain of call sites, it's probably a loop
+                if jump_stack_depth_less_than_max_stack_depth(
+                    &jump_frame,
+                    &context,
+                    handled_jumps,
+                    jumpdests,
+                ) {
                     return Ok(None);
                 }
 
@@ -244,20 +273,26 @@ impl VM {
                                     return true
                                 }
 
-                                // check for mutated memory accesses in the jump condition
-                                if jump_condition_contains_mutated_memory_access(
-                                    &stack_diff,
-                                    jump_condition,
-                                ) {
-                                    return true
-                                }
+                                // a condition that reads memory or storage the stack diff
+                                // mutates is a loop only within one call: the memory
+                                // allocator's condition reads the free pointer, and every call
+                                // from another site brings a different allocation on the stack
+                                if call_context(hist_stack, jumpdests) == context {
+                                    // check for mutated memory accesses in the jump condition
+                                    if jump_condition_contains_mutated_memory_access(
+                                        &stack_diff,
+                                        jump_condition,
+                                    ) {
+                                        return true
+                                    }
 
-                                // check for mutated memory accesses in the jump condition
-                                if jump_condition_contains_mutated_storage_access(
-                                    &stack_diff,
-                                    jump_condition,
-                                ) {
-                                    return true
+                                    // check for mutated storage accesses in the jump condition
+                                    if jump_condition_contains_mutated_storage_access(
+                                        &stack_diff,
+                                        jump_condition,
+                                    ) {
+                                        return true
+                                    }
                                 }
 
                             }
@@ -345,7 +380,12 @@ impl VM {
                     let mut trace_vm = vm.clone();
                     trace_vm.instruction =
                         last_instruction.inputs[0].try_into().unwrap_or(u128::MAX) + 1;
-                    match trace_vm.recursive_map(branch_count, handled_jumps, timeout_at) {
+                    match trace_vm.recursive_map(
+                        branch_count,
+                        handled_jumps,
+                        timeout_at,
+                        jumpdests,
+                    ) {
                         Ok(Some(child_trace)) => vm_trace.children.push(child_trace),
                         Ok(None) => {}
                         Err(e) => {
@@ -355,7 +395,7 @@ impl VM {
                     }
 
                     // push the current path onto the stack
-                    match vm.recursive_map(branch_count, handled_jumps, timeout_at) {
+                    match vm.recursive_map(branch_count, handled_jumps, timeout_at, jumpdests) {
                         Ok(Some(child_trace)) => vm_trace.children.push(child_trace),
                         Ok(None) => {}
                         Err(e) => {
@@ -368,7 +408,12 @@ impl VM {
                     // push a new vm trace to the children
                     let mut trace_vm = vm.clone();
                     trace_vm.instruction = last_instruction.instruction + 1;
-                    match trace_vm.recursive_map(branch_count, handled_jumps, timeout_at) {
+                    match trace_vm.recursive_map(
+                        branch_count,
+                        handled_jumps,
+                        timeout_at,
+                        jumpdests,
+                    ) {
                         Ok(Some(child_trace)) => vm_trace.children.push(child_trace),
                         Ok(None) => {}
                         Err(e) => {
@@ -378,7 +423,7 @@ impl VM {
                     }
 
                     // push the current path onto the stack
-                    match vm.recursive_map(branch_count, handled_jumps, timeout_at) {
+                    match vm.recursive_map(branch_count, handled_jumps, timeout_at, jumpdests) {
                         Ok(Some(child_trace)) => vm_trace.children.push(child_trace),
                         Ok(None) => {}
                         Err(e) => {

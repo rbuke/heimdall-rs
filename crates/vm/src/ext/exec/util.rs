@@ -4,9 +4,44 @@ use alloy::primitives::U256;
 use heimdall_common::constants::{MEMORY_REGEX, STORAGE_REGEX};
 use tracing::trace;
 
-use crate::core::stack::{Stack, StackFrame};
+use crate::core::{
+    opcodes::{JUMPDEST, PUSH0, PUSH1, PUSH32},
+    stack::{Stack, StackFrame},
+};
 
 use super::jump_frame::JumpFrame;
+
+/// For every byte offset of the bytecode, whether it holds a JUMPDEST opcode (push data that
+/// happens to be 0x5b is not one).
+pub(super) fn jumpdest_table(bytecode: &[u8]) -> Vec<bool> {
+    let mut table = vec![false; bytecode.len()];
+    let mut i = 0;
+    while i < bytecode.len() {
+        let opcode = bytecode[i];
+        if opcode == JUMPDEST {
+            table[i] = true;
+        }
+        i += 1;
+        if (PUSH1..=PUSH32).contains(&opcode) {
+            i += (opcode - PUSH1 + 1) as usize;
+        }
+    }
+    table
+}
+
+/// The call context of a stack: the return addresses on it, bottom to top. heimdall folds every
+/// constant into a PUSH, so a return address is a constant frame whose value is a JUMPDEST
+/// offset. Two stacks with different return addresses are in different internal-function calls.
+pub(super) fn call_context(stack: &Stack, jumpdests: &[bool]) -> Vec<U256> {
+    stack
+        .stack
+        .iter()
+        .rev()
+        .filter(|frame| (PUSH0..=PUSH32).contains(&frame.operation.opcode))
+        .map(|frame| frame.value)
+        .filter(|value| value.lt(&U256::from(jumpdests.len())) && jumpdests[value.to::<usize>()])
+        .collect()
+}
 
 /// Given two stacks A and B, return A - B, i.e. the items in A that are not in B.
 /// This operation takes order into account, so if A = [1, 2, 3] and B = [1, 3, 2], then A - B =
@@ -61,16 +96,27 @@ pub(super) fn stack_contains_too_many_items(stack: &Stack) -> bool {
 
 /// Check if the current jump frame has a stack depth less than the max stack depth of all previous
 /// matching jumps. If yes, the stack is not growing and we likely have a loop.
+///
+/// Only previous jumps made in the same call context (the same return addresses on the stack,
+/// see [`call_context`]) count. A shared helper such as solc's memory allocator is first reached
+/// deep inside one caller and later from a shallower call site; the later call is a new call,
+/// not a loop, and pruning it dropped everything behind it.
 pub(super) fn jump_stack_depth_less_than_max_stack_depth(
     current_jump_frame: &JumpFrame,
+    current_context: &[U256],
     handled_jumps: &HashMap<JumpFrame, Vec<Stack>>,
+    jumpdests: &[bool],
 ) -> bool {
-    // (1) get all keys that match current_jump_frame.pc and current_jump_frame.jumpdest
+    // (1) get all keys that match current_jump_frame.pc and current_jump_frame.jumpdest and were
+    // seen in the current call context
     let matching_keys = handled_jumps
-        .keys()
-        .filter(|key| {
-            key.pc == current_jump_frame.pc && key.jumpdest == current_jump_frame.jumpdest
+        .iter()
+        .filter(|(key, stacks)| {
+            key.pc == current_jump_frame.pc &&
+                key.jumpdest == current_jump_frame.jumpdest &&
+                stacks.iter().any(|stack| call_context(stack, jumpdests) == current_context)
         })
+        .map(|(key, _)| key)
         .collect::<Vec<&JumpFrame>>();
 
     // (a) get the max stack_depth of all matching keys
@@ -93,11 +139,17 @@ pub(super) fn jump_stack_depth_less_than_max_stack_depth(
 /// If the stack contains more than 16 of the same item (with the same sources), it is considered a
 /// loop.
 pub(super) fn stack_contains_too_many_of_the_same_item(stack: &Stack) -> bool {
-    if stack.size() > 16 && stack.stack.iter().any(|frame| {
-        let solidified_frame_source = frame.operation.solidify();
-        stack.stack.iter().filter(|f| f.operation.solidify() == solidified_frame_source).count() >=
-            16
-    }) {
+    if stack.size() <= 16 {
+        return false;
+    }
+
+    // solidify each frame once: doing it per pair made this quadratic in the stack size, and the
+    // check runs at every JUMPI
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for frame in &stack.stack {
+        *counts.entry(frame.operation.solidify()).or_default() += 1;
+    }
+    if counts.values().any(|count| *count >= 16) {
         trace!("jump matches loop-detection heuristic: 'stack_contains_too_many_of_the_same_item'",);
         return true;
     }
@@ -350,14 +402,85 @@ mod tests {
 
     use alloy::primitives::U256;
 
-    use super::{grown_stack_diff, jump_condition_appears_recursive};
-    use crate::core::{
-        opcodes::{WrappedInput, WrappedOpcode, ADD, CALLDATALOAD},
-        stack::Stack,
+    use hashbrown::HashMap;
+
+    use super::{
+        call_context, grown_stack_diff, jump_condition_appears_recursive, jumpdest_table,
+        jump_stack_depth_less_than_max_stack_depth,
+    };
+    use crate::{
+        core::{
+            opcodes::{WrappedInput, WrappedOpcode, ADD, CALLDATALOAD, PUSH2},
+            stack::Stack,
+        },
+        ext::exec::jump_frame::JumpFrame,
     };
 
     fn arg(offset: u64) -> WrappedOpcode {
         WrappedOpcode::new(CALLDATALOAD, vec![WrappedInput::Raw(U256::from(offset))])
+    }
+
+    fn constant(value: u64) -> WrappedOpcode {
+        WrappedOpcode::new(PUSH2, vec![WrappedInput::Raw(U256::from(value))])
+    }
+
+    /// `PUSH2 0x005b JUMP JUMPDEST STOP JUMPDEST STOP`: JUMPDESTs at 4 and 6, and the 0x5b byte
+    /// inside the push data at offset 2 is not one
+    fn bytecode() -> Vec<u8> {
+        vec![0x61, 0x00, 0x5b, 0x56, 0x5b, 0x00, 0x5b, 0x00]
+    }
+
+    #[test]
+    fn test_jumpdest_table_skips_push_data() {
+        assert_eq!(
+            jumpdest_table(&bytecode()),
+            vec![false, false, false, false, true, false, true, false]
+        );
+    }
+
+    #[test]
+    fn test_call_context_is_the_return_addresses() {
+        let jumpdests = jumpdest_table(&bytecode());
+        let mut stack = Stack::new();
+        stack.push(U256::from(4), constant(4)); // return address
+        stack.push(U256::from(1), arg(4)); // an argument
+        stack.push(U256::from(2), constant(2)); // a constant that is not a JUMPDEST offset
+        stack.push(U256::from(6), arg(36)); // an argument that happens to equal a JUMPDEST offset
+        stack.push(U256::from(6), constant(6)); // a nested return address
+        assert_eq!(call_context(&stack, &jumpdests), vec![U256::from(4), U256::from(6)]);
+    }
+
+    #[test]
+    fn test_depth_check_only_compares_the_same_call_context() {
+        let jumpdests = jumpdest_table(&bytecode());
+        let mut handled_jumps = HashMap::new();
+
+        let frame = |stack: &Stack| JumpFrame::new(10, U256::from(20), stack.size(), true);
+        let check = |stack: &Stack, handled_jumps: &HashMap<JumpFrame, Vec<Stack>>| {
+            jump_stack_depth_less_than_max_stack_depth(
+                &frame(stack),
+                &call_context(stack, &jumpdests),
+                handled_jumps,
+                &jumpdests,
+            )
+        };
+
+        // a shared helper's JUMPI first reached 3 deep from the call site returning to 4
+        let mut deep = Stack::new();
+        deep.push(U256::from(4), constant(4));
+        deep.push(U256::from(1), arg(4));
+        deep.push(U256::from(2), arg(36));
+        handled_jumps.insert(frame(&deep), vec![deep]);
+
+        // the same helper reached 1 deep from the call site returning to 6: a new call
+        let mut shallow = Stack::new();
+        shallow.push(U256::from(6), constant(6));
+        assert!(!check(&shallow, &handled_jumps));
+
+        // reached 1 deep again from the first call site: the stack shrank within one call
+        let mut shrunk = Stack::new();
+        shrunk.push(U256::from(4), constant(4));
+        assert!(check(&shrunk, &handled_jumps));
     }
 
     #[test]
