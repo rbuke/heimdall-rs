@@ -21,6 +21,9 @@ lazy_static! {
     /// detects a storage access
     pub static ref STORAGE_ACCESS_REGEX: Regex = Regex::new(r"storage\[.*\]").expect("failed to build regex");
 
+    /// an assignment to a temporary or to memory: the scratch work a getter's prologue may do
+    pub static ref SCRATCH_ASSIGNMENT_REGEX: Regex = Regex::new(r"^(\w+ )?(var_\w+|memory\[[^\]]*\]) = ").expect("failed to build regex");
+
     /// detects a storage access
     pub static ref TSTORE_ACCESS_REGEX: Regex = Regex::new(r"transient\[.*\]").expect("failed to build regex");
 

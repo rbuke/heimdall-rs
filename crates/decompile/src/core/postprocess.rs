@@ -9,6 +9,7 @@ use crate::{
     interfaces::AnalyzedFunction,
     utils::{
         constants::STORAGE_ACCESS_REGEX,
+        getter::{getter_return_line, getter_storage_slot},
         postprocessors::{
             arithmetic_postprocessor, bitwise_mask_postprocessor, eliminate_dead_variables,
             memory_postprocessor, remove_empty_lines, storage_postprocessor,
@@ -158,22 +159,18 @@ impl PostprocessOrchestrator {
                     )]
                 }
             }
+        }
 
-            // iterate over logic, if we find a return w/ a storage variable:
-            if let Some(line) = function
-                .logic
-                .iter()
-                .find(|line| line.contains("return") && line.contains("storage"))
-            {
-                if let Some(storage_access) = STORAGE_ACCESS_REGEX.find(line).unwrap_or(None) {
-                    let storage_access = storage_access.as_str();
-                    let access_range = find_balanced_encapsulator(storage_access, ('[', ']'))
-                        .map_err(|e| eyre!("failed to find access range: {e}"))?;
-
-                    state.maybe_getter_for =
-                        Some(format!("storage[{}]", &storage_access[access_range]));
-                }
-            }
+        // a getter's logic is nothing but the return of a plain storage read (see
+        // `getter_return_line`). a function that computes keeps its logic, whatever the analyzer
+        // saw one of its paths return, and whether or not it checks msg.value.
+        let getter_slot =
+            getter_return_line(&function.logic).and_then(|line| getter_storage_slot(line));
+        if !function.payable && (function.pure || function.view) && function.arguments.is_empty() {
+            state.maybe_getter_for = getter_slot.clone();
+        }
+        if getter_slot.is_none() {
+            function.maybe_getter_for = None;
         }
 
         // Run all registered passes
